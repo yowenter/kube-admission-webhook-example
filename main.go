@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -40,12 +41,54 @@ func (vh *webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not decode the admission review from the request", http.StatusBadRequest)
 		return
 	}
-	fmt.Println(ar.Request)
+	fmt.Println("New request ", ar.Request.UID, ar.Request.Kind, ar.Request.Operation, ar.Request.Namespace)
+	if ar.Request.Kind.Kind != "Pod" {
+		fmt.Println("Resource type is not pod, skipped", ar.Request.Kind)
+		return
+	}
+
+	status := "Success"
+	pod := &corev1.Pod{}
+	if _, _, err := deserializer.Decode(ar.Request.Object.Raw, nil, pod); err != nil {
+		http.Error(w, "could not decode admission request object", http.StatusBadRequest)
+		return
+	}
+	for _, container := range pod.Spec.Containers {
+		limits := container.Resources.Limits
+		requests := container.Resources.Requests
+
+		cpuLimit := limits["cpu"]
+		cpuRequest := requests["cpu"]
+		fmt.Println("Container resources cpu ", cpuLimit, cpuRequest)
+
+		limit, ok := cpuLimit.AsInt64()
+		if !ok {
+			continue
+		}
+
+		request, ok := cpuRequest.AsInt64()
+		if !ok {
+			continue
+		}
+
+		if request > 0 {
+			ratio := limit / request
+			fmt.Println("Container overcommit ratio ", container.Name, ratio)
+			if ratio > 3 {
+				status = "Failure"
+			}
+		}
+	}
+	allowed := true
+	if status != "Success" {
+		allowed = false
+	}
+
 	admissionResp := &admissionv1beta1.AdmissionResponse{
 		UID:     ar.Request.UID,
-		Allowed: true,
+		Allowed: allowed,
 		Result: &metav1.Status{
-			Status:  metav1.StatusSuccess,
+			Status:  status,
 			Message: "ok",
 		},
 	}
